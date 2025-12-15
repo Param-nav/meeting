@@ -1,4 +1,4 @@
-// server.js 
+// server.js
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -6,7 +6,7 @@ import bcrypt from "bcryptjs";
 import { Server } from "socket.io";
 import { v4 as uuidv4 } from "uuid";
 
-const PORT = process.env.PORT || 5000; // Render assigns port dynamically
+const PORT = process.env.PORT || 5000; // Render dynamically assigns port
 const app = express();
 
 // ---------------- MIDDLEWARE ----------------
@@ -17,15 +17,16 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 app.use(express.json());
-
-// Handle OPTIONS preflight requests
-app.options("*", cors(corsOptions));
+app.options("*", cors(corsOptions)); // handle preflight
 
 // ---------------- SERVER & SOCKET.IO ----------------
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" },
-  transports: ["websocket", "polling"], // fallback to polling if websocket fails
+  cors: {
+    origin: "*", // Allow all origins; for production specify your frontend URL
+    methods: ["GET", "POST"],
+  },
+  transports: ["websocket", "polling"], // fallback for mobile
 });
 
 // Optional: log connection errors
@@ -34,7 +35,7 @@ io.engine.on("connection_error", (err) => {
 });
 
 // ---------------- IN-MEMORY DATA ----------------
-const users = []; // user database (demo only)
+const users = []; // demo only
 const rooms = {}; // meetingId -> { hostId, users: Map }
 
 // ---------------- AUTH ROUTES ----------------
@@ -69,6 +70,8 @@ io.on("connection", (socket) => {
 
   // Create a meeting (host)
   socket.on("create-meeting", ({ username }, cb) => {
+    if (!username) return cb({ error: "Username required" });
+
     const meetingId = uuidv4();
     rooms[meetingId] = {
       hostId: socket.id,
@@ -77,6 +80,7 @@ io.on("connection", (socket) => {
     socket.join(meetingId);
     socket.meetingId = meetingId;
     socket.username = username;
+
     console.log("🆕 Meeting created:", meetingId);
     cb({ meetingId });
   });
@@ -102,11 +106,15 @@ io.on("connection", (socket) => {
   });
 
   // SIGNALING EVENTS
-  socket.on("offer", ({ to, sdp }) => io.to(to).emit("offer", { from: socket.id, sdp }));
-  socket.on("answer", ({ to, sdp }) => io.to(to).emit("answer", { from: socket.id, sdp }));
-  socket.on("ice-candidate", ({ to, candidate }) =>
-    io.to(to).emit("ice-candidate", { from: socket.id, candidate })
-  );
+  socket.on("offer", ({ to, sdp }) => {
+    if (to && sdp) io.to(to).emit("offer", { from: socket.id, sdp });
+  });
+  socket.on("answer", ({ to, sdp }) => {
+    if (to && sdp) io.to(to).emit("answer", { from: socket.id, sdp });
+  });
+  socket.on("ice-candidate", ({ to, candidate }) => {
+    if (to && candidate) io.to(to).emit("ice-candidate", { from: socket.id, candidate });
+  });
 
   // DISCONNECT
   socket.on("disconnect", () => {
