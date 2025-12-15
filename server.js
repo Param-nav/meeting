@@ -6,27 +6,38 @@ import bcrypt from "bcryptjs";
 import { Server } from "socket.io";
 import { v4 as uuidv4 } from "uuid";
 
+/* ---------------- CONFIG ---------------- */
 const PORT = process.env.PORT || 10000;
 const app = express();
 
-// ---------------- MIDDLEWARE ----------------
+/* ---------------- MIDDLEWARE ---------------- */
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// ---------------- SERVER & SOCKET.IO ----------------
+/* ---------------- HTTP + SOCKET SERVER ---------------- */
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: "*" },
-  transports: ["websocket", "polling"],
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
+
+  // 🔥 VERY IMPORTANT FOR RENDER / FREE HOSTS
+  transports: ["websocket"],
+
+  // 🔥 KEEP CONNECTION ALIVE
+  pingInterval: 25000,
+  pingTimeout: 60000,
 });
 
-// ---------------- IN-MEMORY DATA ----------------
-// ⚠️ Demo only (resets on restart)
+/* ---------------- IN-MEMORY STORAGE ---------------- */
+// ⚠️ Demo only — resets on restart
 const users = [];
-const rooms = {}; // meetingId -> { hostId, users: Map }
+const rooms = {}; 
+// rooms[meetingId] = { hostId, users: Map<socketId, username> }
 
-// ---------------- AUTH ROUTES ----------------
+/* ---------------- AUTH ROUTES ---------------- */
 app.post("/signup", async (req, res) => {
   const { username, password, displayName, gender, country } = req.body;
 
@@ -35,10 +46,11 @@ app.post("/signup", async (req, res) => {
   }
 
   if (users.find((u) => u.username === username)) {
-    return res.status(400).json({ success: false, msg: "User exists" });
+    return res.status(400).json({ success: false, msg: "User already exists" });
   }
 
   const hash = await bcrypt.hash(password, 10);
+
   users.push({
     username,
     password: hash,
@@ -74,11 +86,11 @@ app.post("/login", async (req, res) => {
   });
 });
 
-// ---------------- SOCKET.IO EVENTS ----------------
+/* ---------------- SOCKET.IO ---------------- */
 io.on("connection", (socket) => {
   console.log("⚡ Connected:", socket.id);
 
-  // -------- CREATE MEETING --------
+  /* -------- CREATE MEETING -------- */
   socket.on("create-meeting", ({ username }) => {
     const meetingId = uuidv4();
 
@@ -92,10 +104,11 @@ io.on("connection", (socket) => {
     socket.username = username || "Host";
 
     socket.emit("meeting-created", meetingId);
+
     console.log("🆕 Meeting created:", meetingId);
   });
 
-  // -------- JOIN MEETING --------
+  /* -------- JOIN MEETING -------- */
   socket.on("join-meeting", ({ meetingId, username }) => {
     const room = rooms[meetingId];
 
@@ -110,6 +123,7 @@ io.on("connection", (socket) => {
     socket.meetingId = meetingId;
     socket.username = username;
 
+    // Send existing users to new joiner
     const existingUsers = [...room.users.entries()]
       .filter(([id]) => id !== socket.id)
       .map(([id, name]) => ({
@@ -119,6 +133,7 @@ io.on("connection", (socket) => {
 
     socket.emit("existing-users", existingUsers);
 
+    // Notify others
     socket.to(meetingId).emit("user-joined", {
       id: socket.id,
       username,
@@ -127,7 +142,7 @@ io.on("connection", (socket) => {
     console.log("👤 Joined:", username, meetingId);
   });
 
-  // -------- WEBRTC SIGNALING --------
+  /* -------- WEBRTC SIGNALING -------- */
   socket.on("offer", ({ to, offer }) => {
     io.to(to).emit("offer", {
       from: socket.id,
@@ -151,8 +166,10 @@ io.on("connection", (socket) => {
     });
   });
 
-  // -------- DISCONNECT --------
-  socket.on("disconnect", () => {
+  /* -------- DISCONNECT -------- */
+  socket.on("disconnect", (reason) => {
+    console.log("⚠️ Disconnected:", socket.id, "Reason:", reason);
+
     const meetingId = socket.meetingId;
     if (!meetingId || !rooms[meetingId]) return;
 
@@ -163,6 +180,7 @@ io.on("connection", (socket) => {
       id: socket.id,
     });
 
+    // If host leaves → end meeting
     if (socket.id === room.hostId) {
       socket.to(meetingId).emit("meeting-ended");
       delete rooms[meetingId];
@@ -171,12 +189,12 @@ io.on("connection", (socket) => {
   });
 });
 
-// ---------------- ROOT ----------------
+/* ---------------- HEALTH CHECK ---------------- */
 app.get("/", (_, res) => {
   res.send("✅ Signaling server running");
 });
 
-// ---------------- START SERVER ----------------
+/* ---------------- START SERVER ---------------- */
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
