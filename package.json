@@ -1,0 +1,17 @@
+{
+  "name": "anon-video-signal-server",
+  "version": "1.0.0",
+  "description": "Anonymous video chat signaling server",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "uuid": "^9.0.1"
+  }
+}

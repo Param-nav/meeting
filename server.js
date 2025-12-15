@@ -1,0 +1,131 @@
+import express from "express";
+import http from "http";
+import cors from "cors";
+import bcrypt from "bcryptjs";
+import { Server } from "socket.io";
+import { v4 as uuidv4 } from "uuid";
+
+const PORT = process.env.PORT || 5000;
+const app = express();
+
+app.use(cors({ origin: "*" }));
+app.use(express.json());
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" },
+});
+
+const users = [];
+const rooms = {}; // meetingId -> { hostId, users: Map }
+
+// ---------------- AUTH ----------------
+
+app.post("/signup", async (req, res) => {
+  const { username, password, name, gender, country } = req.body;
+  if (!username || !password)
+    return res.status(400).json({ success: false });
+
+  if (users.find((u) => u.username === username))
+    return res.status(400).json({ success: false });
+
+  const hash = await bcrypt.hash(password, 10);
+  users.push({ username, password: hash, name, gender, country });
+
+  res.json({ success: true });
+});
+
+app.post("/login", async (req, res) => {
+  const { username, password } = req.body;
+  const user = users.find((u) => u.username === username);
+  if (!user) return res.status(400).json({ success: false });
+
+  const valid = await bcrypt.compare(password, user.password);
+  if (!valid) return res.status(400).json({ success: false });
+
+  res.json({ success: true, user: { username, name: user.name } });
+});
+
+// ---------------- SOCKET.IO ----------------
+
+io.on("connection", (socket) => {
+  console.log("⚡ Connected:", socket.id);
+
+  // 🟢 CREATE MEETING (HOST)
+  socket.on("create-meeting", ({ username }, cb) => {
+    const meetingId = uuidv4();
+
+    rooms[meetingId] = {
+      hostId: socket.id,
+      users: new Map([[socket.id, username]]),
+    };
+
+    socket.join(meetingId);
+    socket.meetingId = meetingId;
+    socket.username = username;
+
+    console.log("🆕 Meeting created:", meetingId);
+    cb({ meetingId });
+  });
+
+  // 🔵 JOIN MEETING
+  socket.on("join-meeting", ({ meetingId, username }, cb) => {
+    const room = rooms[meetingId];
+    if (!room) return cb({ error: "Meeting not found" });
+
+    room.users.set(socket.id, username);
+    socket.join(meetingId);
+    socket.meetingId = meetingId;
+    socket.username = username;
+
+    const existingUsers = [...room.users.entries()]
+      .filter(([id]) => id !== socket.id)
+      .map(([id, name]) => ({ peerId: id, username: name }));
+
+    socket.emit("existing-users", existingUsers);
+    socket.to(meetingId).emit("user-joined", {
+      peerId: socket.id,
+      username,
+    });
+
+    cb({ success: true });
+  });
+
+  // 🔁 SIGNALING
+  socket.on("offer", ({ to, sdp }) =>
+    io.to(to).emit("offer", { from: socket.id, sdp })
+  );
+
+  socket.on("answer", ({ to, sdp }) =>
+    io.to(to).emit("answer", { from: socket.id, sdp })
+  );
+
+  socket.on("ice-candidate", ({ to, candidate }) =>
+    io.to(to).emit("ice-candidate", { from: socket.id, candidate })
+  );
+
+  // ❌ DISCONNECT
+  socket.on("disconnect", () => {
+    const meetingId = socket.meetingId;
+    if (!meetingId || !rooms[meetingId]) return;
+
+    const room = rooms[meetingId];
+    room.users.delete(socket.id);
+    socket.to(meetingId).emit("user-left", socket.id);
+
+    // host left → end meeting
+    if (socket.id === room.hostId) {
+      socket.to(meetingId).emit("meeting-ended");
+      delete rooms[meetingId];
+      console.log("🛑 Meeting ended:", meetingId);
+    }
+  });
+});
+
+app.get("/", (_, res) =>
+  res.send("✅ Zoom-style signaling server running")
+);
+
+server.listen(PORT, () =>
+  console.log(`🚀 Server running on ${PORT}`)
+);
