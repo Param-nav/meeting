@@ -6,17 +6,26 @@ import bcrypt from "bcryptjs";
 import { Server } from "socket.io";
 import { v4 as uuidv4 } from "uuid";
 
-const PORT = process.env.PORT || 5000; // Render assigns the port dynamically
+const PORT = process.env.PORT || 5000; // Render assigns port dynamically
 const app = express();
 
 // ---------------- MIDDLEWARE ----------------
-app.use(cors({ origin: "*" })); // allow all origins (for testing)
+const corsOptions = {
+  origin: "*", // Allow all origins for testing; restrict in production
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+app.use(cors(corsOptions));
 app.use(express.json());
+
+// Handle OPTIONS preflight requests
+app.options("*", cors(corsOptions));
 
 // ---------------- SERVER & SOCKET.IO ----------------
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" },
+  transports: ["websocket", "polling"], // fallback to polling if websocket fails
 });
 
 // Optional: log connection errors
@@ -25,7 +34,7 @@ io.engine.on("connection_error", (err) => {
 });
 
 // ---------------- IN-MEMORY DATA ----------------
-const users = []; // user database (for demo/testing only)
+const users = []; // user database (demo only)
 const rooms = {}; // meetingId -> { hostId, users: Map }
 
 // ---------------- AUTH ROUTES ----------------
@@ -61,16 +70,13 @@ io.on("connection", (socket) => {
   // Create a meeting (host)
   socket.on("create-meeting", ({ username }, cb) => {
     const meetingId = uuidv4();
-
     rooms[meetingId] = {
       hostId: socket.id,
       users: new Map([[socket.id, username]]),
     };
-
     socket.join(meetingId);
     socket.meetingId = meetingId;
     socket.username = username;
-
     console.log("🆕 Meeting created:", meetingId);
     cb({ meetingId });
   });
@@ -121,9 +127,7 @@ io.on("connection", (socket) => {
 });
 
 // ---------------- ROOT ----------------
-app.get("/", (_, res) =>
-  res.send("✅ Zoom-style signaling server running")
-);
+app.get("/", (_, res) => res.send("✅ Zoom-style signaling server running"));
 
 // ---------------- START SERVER ----------------
 server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
