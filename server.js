@@ -149,13 +149,13 @@ io.on("connection", (socket) => {
 // Root "/" always returns 200 OK, wakes Render free server
 app.get("/", (_, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*"); // allow Flutter Web
-  res.send("✅ Zoom-like signaling server running");
+  res.status(200).json({ success: true, message: "Server awake" });
 });
 
-// Optional dedicated /ping endpoint
+// Dedicated /ping endpoint for waking
 app.get("/ping", (_, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.json({ status: "ok" });
+  res.status(200).json({ status: "ok", message: "Server awake" });
 });
 
 /* ---------------- START ---------------- */
