@@ -1,10 +1,8 @@
-// server.js
 import express from "express";
 import http from "http";
 import cors from "cors";
 import bcrypt from "bcryptjs";
 import { Server } from "socket.io";
-import { v4 as uuidv4 } from "uuid";
 
 /* ---------------- CONFIG ---------------- */
 const PORT = process.env.PORT || 10000;
@@ -14,65 +12,45 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-/* ---------------- HTTP + SOCKET SERVER ---------------- */
+/* ---------------- HTTP + SOCKET ---------------- */
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-
-  // 🔥 VERY IMPORTANT FOR RENDER / FREE HOSTS
+  cors: { origin: "*", methods: ["GET", "POST"] },
   transports: ["websocket"],
-
-  // 🔥 KEEP CONNECTION ALIVE
   pingInterval: 25000,
   pingTimeout: 60000,
 });
 
-/* ---------------- IN-MEMORY STORAGE ---------------- */
-// ⚠️ Demo only — resets on restart
-const users = [];
-const rooms = {}; 
+/* ---------------- IN-MEMORY STORE ---------------- */
 // rooms[meetingId] = { hostId, users: Map<socketId, username> }
+const users = [];
+const rooms = {};
 
-/* ---------------- AUTH ROUTES ---------------- */
+/* ---------------- AUTH ---------------- */
 app.post("/signup", async (req, res) => {
   const { username, password, displayName, gender, country } = req.body;
 
   if (!username || !password) {
-    return res.status(400).json({ success: false, msg: "Missing fields" });
+    return res.status(400).json({ msg: "Missing fields" });
   }
 
   if (users.find((u) => u.username === username)) {
-    return res.status(400).json({ success: false, msg: "User already exists" });
+    return res.status(400).json({ msg: "User exists" });
   }
 
   const hash = await bcrypt.hash(password, 10);
 
-  users.push({
-    username,
-    password: hash,
-    displayName,
-    gender,
-    country,
-  });
-
+  users.push({ username, password: hash, displayName, gender, country });
   res.json({ success: true });
 });
 
 app.post("/login", async (req, res) => {
   const { username, password } = req.body;
-
   const user = users.find((u) => u.username === username);
-  if (!user) {
-    return res.status(400).json({ success: false, msg: "User not found" });
-  }
 
-  const ok = await bcrypt.compare(password, user.password);
-  if (!ok) {
-    return res.status(400).json({ success: false, msg: "Wrong password" });
+  if (!user || !(await bcrypt.compare(password, user.password))) {
+    return res.status(400).json({ msg: "Invalid credentials" });
   }
 
   res.json({
@@ -86,48 +64,32 @@ app.post("/login", async (req, res) => {
   });
 });
 
-/* ---------------- SOCKET.IO ---------------- */
+/* ---------------- SOCKET ---------------- */
 io.on("connection", (socket) => {
   console.log("⚡ Connected:", socket.id);
 
-  /* -------- CREATE MEETING -------- */
-  socket.on("create-meeting", ({ username }) => {
-    const meetingId = uuidv4();
-
-    rooms[meetingId] = {
-      hostId: socket.id,
-      users: new Map([[socket.id, username || "Host"]]),
-    };
-
-    socket.join(meetingId);
-    socket.meetingId = meetingId;
-    socket.username = username || "Host";
-
-    socket.emit("meeting-created", meetingId);
-
-    console.log("🆕 Meeting created:", meetingId);
-  });
-
-  /* -------- JOIN MEETING -------- */
   socket.on("join-meeting", ({ meetingId, username }) => {
-    const room = rooms[meetingId];
+    if (!meetingId) return;
 
-    if (!room) {
-      socket.emit("meeting-error", "Meeting not found");
-      return;
+    if (!rooms[meetingId]) {
+      rooms[meetingId] = {
+        hostId: socket.id,
+        users: new Map(),
+      };
     }
 
-    room.users.set(socket.id, username);
-    socket.join(meetingId);
+    const room = rooms[meetingId];
+    room.users.set(socket.id, username || "Guest");
 
+    socket.join(meetingId);
     socket.meetingId = meetingId;
-    socket.username = username;
+    socket.username = username || "Guest";
 
     // Send existing users to new joiner
     const existingUsers = [...room.users.entries()]
       .filter(([id]) => id !== socket.id)
       .map(([id, name]) => ({
-        id,
+        peerId: id,
         username: name,
       }));
 
@@ -135,26 +97,20 @@ io.on("connection", (socket) => {
 
     // Notify others
     socket.to(meetingId).emit("user-joined", {
-      id: socket.id,
-      username,
+      peerId: socket.id,
+      username: socket.username,
     });
 
-    console.log("👤 Joined:", username, meetingId);
+    console.log(`👤 ${socket.username} joined ${meetingId}`);
   });
 
-  /* -------- WEBRTC SIGNALING -------- */
+  /* -------- SIGNALING -------- */
   socket.on("offer", ({ to, offer }) => {
-    io.to(to).emit("offer", {
-      from: socket.id,
-      offer,
-    });
+    io.to(to).emit("offer", { from: socket.id, offer });
   });
 
   socket.on("answer", ({ to, answer }) => {
-    io.to(to).emit("answer", {
-      from: socket.id,
-      answer,
-    });
+    io.to(to).emit("answer", { from: socket.id, answer });
   });
 
   socket.on("ice-candidate", ({ to, candidate, sdpMid, sdpMLineIndex }) => {
@@ -167,34 +123,36 @@ io.on("connection", (socket) => {
   });
 
   /* -------- DISCONNECT -------- */
-  socket.on("disconnect", (reason) => {
-    console.log("⚠️ Disconnected:", socket.id, "Reason:", reason);
-
+  socket.on("disconnect", () => {
     const meetingId = socket.meetingId;
     if (!meetingId || !rooms[meetingId]) return;
 
     const room = rooms[meetingId];
     room.users.delete(socket.id);
 
-    socket.to(meetingId).emit("user-left", {
-      id: socket.id,
-    });
+    socket.to(meetingId).emit("user-left", socket.id);
 
-    // If host leaves → end meeting
+    // End meeting if host left
     if (socket.id === room.hostId) {
       socket.to(meetingId).emit("meeting-ended");
       delete rooms[meetingId];
       console.log("🛑 Meeting ended:", meetingId);
+      return;
+    }
+
+    // Cleanup empty rooms
+    if (room.users.size === 0) {
+      delete rooms[meetingId];
     }
   });
 });
 
-/* ---------------- HEALTH CHECK ---------------- */
+/* ---------------- HEALTH ---------------- */
 app.get("/", (_, res) => {
-  res.send("✅ Signaling server running");
+  res.send("✅ Zoom-like signaling server running");
 });
 
-/* ---------------- START SERVER ---------------- */
+/* ---------------- START ---------------- */
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
