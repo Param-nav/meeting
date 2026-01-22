@@ -9,6 +9,7 @@ const PORT = process.env.PORT || 10000;
 const app = express();
 
 /* ---------------- MIDDLEWARE ---------------- */
+// Enable CORS for all origins (required for Flutter Web)
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
@@ -88,10 +89,7 @@ io.on("connection", (socket) => {
     // Send existing users to new joiner
     const existingUsers = [...room.users.entries()]
       .filter(([id]) => id !== socket.id)
-      .map(([id, name]) => ({
-        peerId: id,
-        username: name,
-      }));
+      .map(([id, name]) => ({ peerId: id, username: name }));
 
     socket.emit("existing-users", existingUsers);
 
@@ -147,9 +145,17 @@ io.on("connection", (socket) => {
   });
 });
 
-/* ---------------- HEALTH ---------------- */
+/* ---------------- HEALTH / WAKE-UP ---------------- */
+// Root "/" always returns 200 OK, wakes Render free server
 app.get("/", (_, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*"); // allow Flutter Web
   res.send("✅ Zoom-like signaling server running");
+});
+
+// Optional dedicated /ping endpoint
+app.get("/ping", (_, res) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.json({ status: "ok" });
 });
 
 /* ---------------- START ---------------- */
