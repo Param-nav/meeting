@@ -9,7 +9,6 @@ const PORT = process.env.PORT || 10000;
 const app = express();
 
 /* ---------------- MIDDLEWARE ---------------- */
-// Enable CORS for all origins (required for Flutter Web)
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
@@ -24,9 +23,18 @@ const io = new Server(server, {
 });
 
 /* ---------------- IN-MEMORY STORE ---------------- */
-// rooms[meetingId] = { hostId, users: Map<socketId, username> }
+// users: [{ username, password, displayName, gender, country }]
+// rooms[meetingId] = { hostId, hostName, users: Map<socketId, username> }
 const users = [];
 const rooms = {};
+
+/* ---------------- HELPERS ---------------- */
+const getRoomsList = () =>
+  Object.keys(rooms).map((meetingId) => ({
+    meetingId,
+    host: rooms[meetingId].hostName,
+    participants: rooms[meetingId].users.size,
+  }));
 
 /* ---------------- AUTH ---------------- */
 app.post("/signup", async (req, res) => {
@@ -69,12 +77,41 @@ app.post("/login", async (req, res) => {
 io.on("connection", (socket) => {
   console.log("⚡ Connected:", socket.id);
 
+  /* -------- LOBBY -------- */
+
+  socket.on("get-rooms", () => {
+    socket.emit("rooms-update", getRoomsList());
+  });
+
+  socket.on("create-room", ({ meetingId, host }) => {
+    if (!meetingId || rooms[meetingId]) return;
+
+    rooms[meetingId] = {
+      hostId: socket.id,
+      hostName: host || "Host",
+      users: new Map(),
+    };
+
+    console.log("🆕 Room created:", meetingId);
+
+    io.emit("room-created", {
+      meetingId,
+      host: host || "Host",
+      participants: 0,
+    });
+
+    io.emit("rooms-update", getRoomsList());
+  });
+
+  /* -------- JOIN MEETING -------- */
+
   socket.on("join-meeting", ({ meetingId, username }) => {
     if (!meetingId) return;
 
     if (!rooms[meetingId]) {
       rooms[meetingId] = {
         hostId: socket.id,
+        hostName: username || "Host",
         users: new Map(),
       };
     }
@@ -86,23 +123,24 @@ io.on("connection", (socket) => {
     socket.meetingId = meetingId;
     socket.username = username || "Guest";
 
-    // Send existing users to new joiner
     const existingUsers = [...room.users.entries()]
       .filter(([id]) => id !== socket.id)
       .map(([id, name]) => ({ peerId: id, username: name }));
 
     socket.emit("existing-users", existingUsers);
 
-    // Notify others
     socket.to(meetingId).emit("user-joined", {
       peerId: socket.id,
       username: socket.username,
     });
 
+    io.emit("rooms-update", getRoomsList());
+
     console.log(`👤 ${socket.username} joined ${meetingId}`);
   });
 
-  /* -------- SIGNALING -------- */
+  /* -------- WEBRTC SIGNALING -------- */
+
   socket.on("offer", ({ to, offer }) => {
     io.to(to).emit("offer", { from: socket.id, offer });
   });
@@ -121,6 +159,7 @@ io.on("connection", (socket) => {
   });
 
   /* -------- DISCONNECT -------- */
+
   socket.on("disconnect", () => {
     const meetingId = socket.meetingId;
     if (!meetingId || !rooms[meetingId]) return;
@@ -130,32 +169,27 @@ io.on("connection", (socket) => {
 
     socket.to(meetingId).emit("user-left", socket.id);
 
-    // End meeting if host left
     if (socket.id === room.hostId) {
-      socket.to(meetingId).emit("meeting-ended");
       delete rooms[meetingId];
-      console.log("🛑 Meeting ended:", meetingId);
+      io.emit("room-removed", meetingId);
+      io.emit("rooms-update", getRoomsList());
+      console.log("🛑 Room closed:", meetingId);
       return;
     }
 
-    // Cleanup empty rooms
     if (room.users.size === 0) {
       delete rooms[meetingId];
+      io.emit("room-removed", meetingId);
     }
+
+    io.emit("rooms-update", getRoomsList());
   });
 });
 
 /* ---------------- HEALTH / WAKE-UP ---------------- */
-// Root "/" always returns 200 OK, wakes Render free server
 app.get("/", (_, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*"); // allow Flutter Web
-  res.status(200).json({ success: true, message: "Server awake" });
-});
-
-// Dedicated /ping endpoint for waking
-app.get("/ping", (_, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.status(200).json({ status: "ok", message: "Server awake" });
+  res.status(200).json({ success: true, message: "Server awake" });
 });
 
 /* ---------------- START ---------------- */
